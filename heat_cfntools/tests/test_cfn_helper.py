@@ -16,6 +16,8 @@
 
 import json
 import mox
+import os
+
 from testtools import TestCase
 from testtools.matchers import FileContains
 from tempfile import NamedTemporaryFile
@@ -23,6 +25,89 @@ from boto.cloudformation import CloudFormationConnection
 
 from heat_cfntools.cfntools import cfn_helper
 
+
+class TestHupConfig(TestCase):
+
+    def test_hup_config(self):
+        actions_echo = NamedTemporaryFile()
+
+        hooks_conf = NamedTemporaryFile()
+        def write_hook_conf(f, name, triggers, path, action, runas):
+            f.write(
+                '[%s]\ntriggers=%s\npath=%s\naction=%s\nrunas=%s\n\n' % (
+                    name, triggers, path, action, runas))
+
+        write_hook_conf(
+            hooks_conf,
+            'hook2',
+            'service2.restarted',
+            'Resources.resource2.Metadata',
+            '`echo hook2 >> %s`' % actions_echo.name,
+            os.getenv('USERNAME'))
+        write_hook_conf(
+            hooks_conf,
+            'hook1',
+            'service1.restarted',
+            'Resources.resource1.Metadata',
+            '`echo hook1 >> %s`' % actions_echo.name,
+            os.getenv('USERNAME'))
+        write_hook_conf(
+            hooks_conf,
+            'hook3',
+            'service3.restarted',
+            'Resources.resource3.Metadata',
+            '`echo hook3 >> %s`' % actions_echo.name,
+            os.getenv('USERNAME'))
+        write_hook_conf(
+            hooks_conf,
+            'cfn-http-restarted',
+            'service.restarted',
+            'Resources.resource.Metadata',
+            '`echo cfn-http-restarted >> %s`' % actions_echo.name,
+            os.getenv('USERNAME'))
+        hooks_conf.flush()
+
+        fcreds = NamedTemporaryFile()
+        fcreds.write('AWSAccessKeyId=foo\nAWSSecretKey=bar\n')
+        fcreds.flush()
+
+        main_conf = NamedTemporaryFile()
+        main_conf.write('''[main]
+stack=teststack
+credential-file=%s
+region=region1
+interval=120''' % fcreds.name)
+        main_conf.flush()
+
+        mainconfig = cfn_helper.HupConfig([
+            open(main_conf.name),
+            open(hooks_conf.name)])
+        unique_resources = mainconfig.unique_resources_get()
+        self.assertSequenceEqual([
+            'resource2',
+            'resource1',
+            'resource3',
+            'resource'
+        ], unique_resources)
+
+        hooks = mainconfig.hooks
+        self.assertEqual('hook2', hooks[0].name)
+        self.assertEqual('hook1', hooks[1].name)
+        self.assertEqual('hook3', hooks[2].name)
+        self.assertEqual('cfn-http-restarted', hooks[3].name)
+
+        for hook in mainconfig.hooks:
+            hook.event(hook.triggers, None, hook.resource_name_get())
+
+        self.assertThat(actions_echo.name, FileContains(
+            'hook2\nhook1\nhook3\ncfn-http-restarted\n'))
+        try:
+            hooks_conf.close()
+            fcreds.close()
+            main_conf.close()
+            actions_echo.close()
+        except:
+            pass
 
 class TestCfnHelper(TestCase):
 
@@ -75,7 +160,7 @@ class TestCfnHelper(TestCase):
 
     def test_parse_creds_file(self):
         def parse_creds_test(file_contents, creds_match):
-            with NamedTemporaryFile(mode='w') as fcreds:
+            with NamedTemporaryFile() as fcreds:
                 fcreds.write(file_contents)
                 fcreds.flush()
                 creds = cfn_helper.parse_creds_file(fcreds.name)
