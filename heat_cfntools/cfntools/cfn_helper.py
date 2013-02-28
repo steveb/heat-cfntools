@@ -23,6 +23,7 @@ import ConfigParser
 import errno
 import grp
 import hashlib
+import itertools
 import json
 import logging
 import os
@@ -1211,3 +1212,168 @@ class Metadata(object):
             if self._has_changed:
                 for h in hooks:
                     h.event('post.update', self.resource, self.resource)
+
+
+class WatchServerConnectionError(Exception):
+    pass
+
+
+class MetricData(object):
+
+    def __init__(self, access_key=None, secret_key=None, watch_server_path=None):
+        self.access_key = access_key
+        self.secret_key = secret_key
+        self.watch_server_path = watch_server_path
+
+    def put_metric_data(self, namespace, name, value=None, timestamp=None,
+                        unit=None, dimensions=None, statistics=None):
+        """
+        Publishes metric data points to Amazon CloudWatch. Amazon Cloudwatch
+        associates the data points with the specified metric. If the specified
+        metric does not exist, Amazon CloudWatch creates the metric. If a list
+        is specified for some, but not all, of the arguments, the remaining
+        arguments are repeated a corresponding number of times.
+
+        :type namespace: str
+        :param namespace: The namespace of the metric.
+
+        :type name: str or list
+        :param name: The name of the metric.
+
+        :type value: float or list
+        :param value: The value for the metric.
+
+        :type timestamp: datetime or list
+        :param timestamp: The time stamp used for the metric. If not specified,
+            the default value is set to the time the metric data was received.
+
+        :type unit: string or list
+        :param unit: The unit of the metric.  Valid Values: Seconds |
+            Microseconds | Milliseconds | Bytes | Kilobytes |
+            Megabytes | Gigabytes | Terabytes | Bits | Kilobits |
+            Megabits | Gigabits | Terabits | Percent | Count |
+            Bytes/Second | Kilobytes/Second | Megabytes/Second |
+            Gigabytes/Second | Terabytes/Second | Bits/Second |
+            Kilobits/Second | Megabits/Second | Gigabits/Second |
+            Terabits/Second | Count/Second | None
+
+        :type dimensions: dict
+        :param dimensions: Add extra name value pairs to associate
+            with the metric, i.e.:
+            {'name1': value1, 'name2': (value2, value3)}
+
+        :type statistics: dict or list
+        :param statistics: Use a statistic set instead of a value, for example::
+
+            {'maximum': 30, 'minimum': 1, 'samplecount': 100, 'sum': 10000}
+        """
+        if self.access_key and self.secret_key:
+            access_key = self.access_key
+            secret_key = self.secret_key
+        else:
+            raise WatchServerConnectionError("No credentials!")
+
+        params = {
+            'SignatureMethod': 'HmacSHA256',
+            'SignatureVersion': '2',
+            'AWSAccessKeyId': access_key,
+            'Timestamp':
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.localtime()),
+            'Action': 'PutMetricData',
+            'Version': '2010-08-01',
+            'ContentType': 'JSON',
+            'Namespace': namespace
+        }
+
+        params.update(self.build_put_params(name, value=value, timestamp=timestamp,
+            unit=unit, dimensions=dimensions, statistics=statistics))
+
+        server_url = read_one_line_file(self.watch_server_path)
+        if server_url == None:
+            raise WatchServerConnectionError('No watch server specified')
+
+        parts = urlparse.urlparse(server_url)
+        path = '/v1/'
+
+        # Sign the request
+        signer = ec2signer.Ec2Signer(secret_key)
+        params['Signature'] = signer.generate({
+            'host': parts.netloc.lower(),
+            'verb': 'POST',
+            'path': path,
+            'params': params})
+
+        url = urlparse.urlunparse(
+            (parts.scheme, parts.netloc, path, None, urllib.urlencode(params), None))
+        resp, body_str = http_client.http_request('POST', url)
+        res = json.loads(body_str)
+        metadata = res['PutMetricDataResponse'][
+            'PutMetricDataResult'][
+                'ResponseMetadata']
+        return metadata
+
+    def build_put_params(self, name, value=None, timestamp=None,
+                        unit=None, dimensions=None, statistics=None):
+        args = (name, value, unit, dimensions, statistics, timestamp)
+        length = max(map(lambda a: len(a) if isinstance(a, list) else 1, args))
+
+        def tolist(a):
+            if not isinstance(a, list):
+                return [a] * length
+            if len(a) == length:
+                return a
+            raise Exception(
+                'Must specify equal number of elements; expected %d.' % length)
+
+        count = itertools.count(1)
+        def transform(n, v, u, d, s, t):
+            tokey = lambda i, key: 'MetricData.member.%d.%s' % (i, key)
+            i = count.next()
+            yield tokey(i, 'MetricName'), n
+
+            if statistics:
+                yield tokey(i, 'StatisticValues.Maximum'), s['maximum']
+                yield tokey(i, 'StatisticValues.Minimum'), s['minimum']
+                yield tokey(i, 'StatisticValues.SampleCount'), s['samplecount']
+                yield tokey(i, 'StatisticValues.Sum'), s['sum']
+                if v != None:
+                    msg = 'You supplied a value and statistics for a metric.'
+                    msg += 'Posting statistics and not value.'
+                    LOG.warn(msg)
+            elif v != None:
+                yield tokey(i, 'Value'), v
+            else:
+                raise Exception('Must specify a value or statistics to put.')
+
+            if dimensions:
+                for dim_key, dim_value in self.build_dimension_param(
+                        d).iteritems():
+                    yield tokey(i, dim_key), dim_value
+
+            if timestamp:
+                yield tokey(i, 'Timestamp'), t.isoformat()
+
+            if unit:
+                yield tokey(i, 'Unit'), u
+
+        return dict(itertools.chain.from_iterable(
+            transform(*list_args) for list_args in zip(
+                *map(tolist, args))))
+
+
+    def build_dimension_param(self, dimension):
+        prefix = 'Dimensions.member'
+        count = itertools.count(1)
+        def transform(key, value):
+            if value is None:
+                value = [None]
+            if isinstance(value, basestring):
+                value = [value]
+            for v in value:
+                i = count.next()
+                yield ('%s.%d.Name' % (prefix, i), key)
+                if v is not None:
+                    yield ('%s.%d.Value' % (prefix, i), v)
+
+        return dict(itertools.chain.from_iterable(
+            transform(k, v) for k, v in dimension.items()))
