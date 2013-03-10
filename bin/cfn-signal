@@ -22,6 +22,7 @@ import sys
 
 
 from heat_cfntools.cfntools.cfn_helper import *
+from heat_cfntools.cfntools import http_client
 
 
 description = " "
@@ -82,7 +83,9 @@ body = {
     "Data" : args.data
 }
 
-cmd_str = "curl -X PUT -H \'Content-Type:\' --data-binary \'%s\' \"%s\"" % \
-           (json.dumps(body), args.url)
-command = CommandRunner(cmd_str).run()
-sys.exit(command.status)
+try:
+    http_client.http_request('PUT', args.url, json.dumps(body), {
+        'Content-Type': 'application/json'})
+except Exception as e:
+    LOG.exception("Error sending signal: " % e)
+    exit(1)
