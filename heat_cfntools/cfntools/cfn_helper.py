@@ -36,11 +36,12 @@ except ImportError:
     rpmutils_present = False
 import re
 import subprocess
+import time
+import urllib
+import urlparse
 
-# Override BOTO_CONFIG, which makes boto look only at the specified
-# config file, instead of the default locations
-os.environ['BOTO_CONFIG'] = '/var/lib/heat-cfntools/cfn-boto-cfg'
-from boto.cloudformation import CloudFormationConnection
+from heat_cfntools.cfntools import http_client
+from heat_cfntools.cfntools import ec2signer
 
 
 LOG = logging.getLogger(__name__)
@@ -65,6 +66,15 @@ def parse_creds_file(path='/etc/cfn/cfn-credentials'):
             if match:
                 creds[key] = match.group(1)
     return creds
+
+
+def metadata_server_url(
+        metadata_server_path='/var/lib/heat-cfntools/cfn-metadata-server'):
+    try:
+        with open(metadata_server_path) as f:
+            return f.read().strip() or None
+    except IOError:
+        return None
 
 
 class HupConfig(object):
@@ -814,31 +824,6 @@ class ConfigsetsHandler(object):
         return executionlist
 
 
-def metadata_server_port(
-        datafile='/var/lib/heat-cfntools/cfn-metadata-server'):
-    """
-    Return the the metadata server port
-    reads the :NNNN from the end of the URL in cfn-metadata-server
-    """
-    try:
-        f = open(datafile)
-        server_url = f.read().strip()
-        f.close()
-    except IOError:
-        return None
-
-    if len(server_url) < 1:
-        return None
-
-    if server_url[-1] == '/':
-        server_url = server_url[:-1]
-
-    try:
-        return int(server_url.split(':')[-1])
-    except ValueError:
-        return None
-
-
 class CommandsHandler(object):
 
     def __init__(self, commands):
@@ -1040,7 +1025,7 @@ class Metadata(object):
         self._metadata = None
         self._has_changed = False
 
-    def remote_metadata(self):
+    def remote_metadata(self, metadata_server_path):
         """
         Connect to the metadata server and retreive the metadata from there.
         """
@@ -1055,27 +1040,44 @@ class Metadata(object):
         else:
             raise MetadataServerConnectionError("No credentials!")
 
-        port = metadata_server_port() or self.DEFAULT_PORT
+        server_url = metadata_server_url(metadata_server_path)
+        if server_url == None:
+            raise MetadataServerConnectionError('No metadata server specified')
 
-        client = CloudFormationConnection(aws_access_key_id=access_key,
-                                          aws_secret_access_key=secret_key,
-                                          is_secure=False, port=port,
-                                          path="/v1", debug=0)
+        parts = urlparse.urlparse(server_url)
+        path = '/v1/'
+        params = {
+            'SignatureMethod': 'HmacSHA256',
+            'SignatureVersion': '2',
+            'AWSAccessKeyId': access_key,
+            'Timestamp':
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.localtime()),
+            'Action': 'DescribeStackResource',
+            'ContentType': 'JSON',
+            'StackName': self.stack,
+            'LogicalResourceId': self.resource,
+        }
+        # Sign the request
+        signer = ec2signer.Ec2Signer(secret_key)
+        params['Signature'] = signer.generate({
+            'host': parts.netloc.lower(),
+            'verb': 'GET',
+            'path': path,
+            'params': params})
 
-        res = client.describe_stack_resource(self.stack, self.resource)
-        # Note pending upstream patch will make this response a
-        # boto.cloudformation.stack.StackResourceDetail object
-        # which aligns better with all the existing calls
-        # see https://github.com/boto/boto/pull/857
-        resource_detail = res['DescribeStackResourceResponse'][
-            'DescribeStackResourceResult']['StackResourceDetail']
-        return resource_detail['Metadata']
+        url = urlparse.urlunparse(
+            (parts.scheme, parts.netloc, path, None, urllib.urlencode(params), None))
+        resp, body_str = http_client.http_request('GET', url)
+        res = json.loads(body_str)
+        metadata = res['DescribeStackResourceResponse']['DescribeStackResourceResult']['StackResourceDetail']['Metadata']
+        return metadata
 
     def retrieve(
             self,
             meta_str=None,
             default_path='/var/lib/heat-cfntools/cfn-init-data',
-            last_path='/tmp/last_metadata'):
+            last_path='/tmp/last_metadata',
+            metadata_server_path='/var/lib/heat-cfntools/cfn-metadata-server'):
         """
         Read the metadata from the given filename
         """
@@ -1083,7 +1085,7 @@ class Metadata(object):
             self._data = meta_str
         else:
             try:
-                self._data = self.remote_metadata()
+                self._data = self.remote_metadata(metadata_server_path)
             except MetadataServerConnectionError as ex:
                 LOG.warn("Unable to retrieve remote metadata : %s" % str(ex))
 
