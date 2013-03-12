@@ -445,21 +445,21 @@ class TestCfnHelper(testtools.TestCase):
         with tempfile.NamedTemporaryFile() as metadata_info:
             metadata_info.write(content)
             metadata_info.flush()
-            port = cfn_helper.metadata_server_url(metadata_info.name)
-            self.assertEquals(value, port)
+            one_line = cfn_helper.read_one_line_file(metadata_info.name)
+            self.assertEquals(value, one_line)
 
-    def test_metadata_server_url(self):
+    def test_read_one_line_file(self):
         self._check_metadata_content(
             "http://172.20.42.42:8000\n", 'http://172.20.42.42:8000')
 
-    def test_metadata_server_url_emptyfile(self):
+    def test_read_one_line_file_emptyfile(self):
         self._check_metadata_content("\n", None)
         self._check_metadata_content("", None)
 
-    def test_metadata_server_nofile(self):
+    def test_read_one_line_file_nofile(self):
         random_filename = self.getUniqueString()
         self.assertEquals(None,
-                          cfn_helper.metadata_server_url(random_filename))
+                          cfn_helper.read_one_line_file(random_filename))
 
     def test_to_boolean(self):
         self.assertTrue(cfn_helper.to_boolean(True))

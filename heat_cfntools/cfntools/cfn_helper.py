@@ -68,10 +68,9 @@ def parse_creds_file(path='/etc/cfn/cfn-credentials'):
     return creds
 
 
-def metadata_server_url(
-        metadata_server_path='/var/lib/heat-cfntools/cfn-metadata-server'):
+def read_one_line_file(file_path):
     try:
-        with open(metadata_server_path) as f:
+        with open(file_path) as f:
             return f.read().strip() or None
     except IOError:
         return None
