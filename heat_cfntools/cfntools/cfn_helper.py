@@ -1040,7 +1040,7 @@ class Metadata(object):
         else:
             raise MetadataServerConnectionError("No credentials!")
 
-        server_url = metadata_server_url(metadata_server_path)
+        server_url = read_one_line_file(metadata_server_path)
         if server_url == None:
             raise MetadataServerConnectionError('No metadata server specified')
 
