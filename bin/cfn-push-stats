@@ -11,6 +11,7 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+from heat_cfntools.cfntools import cfn_helper
 
 """
 Implements cfn-push-stats CloudFormation functionality
@@ -21,12 +22,6 @@ import os
 import subprocess
 import random
 import sys
-
-# Override BOTO_CONFIG, which makes boto look only at the specified
-# config file, instead of the default locations
-os.environ['BOTO_CONFIG'] = '/var/lib/heat-cfntools/cfn-boto-cfg'
-from boto.ec2.cloudwatch import CloudWatchConnection
-
 
 log_format = '%(levelname)s [%(asctime)s] %(message)s'
 log_file_name = "/var/log/cfn-push-stats.log"
@@ -225,13 +220,10 @@ def parse_haproxy_unix_socket(res, latency_only=False):
 
 def send_stats(info):
 
-    # Create boto connection, need the hard-coded port/path as boto
-    # can't read these from config values in BOTO_CONFIG
-    # FIXME : currently only http due to is_secure=False
-    client = CloudWatchConnection(
-             aws_access_key_id=credentials['AWSAccessKeyId'],
-             aws_secret_access_key=credentials['AWSSecretKey'],
-             is_secure=False, port=8003, path="/v1", debug=0)
+    client = MetricData(
+             access_key=credentials['AWSAccessKeyId'],
+             secret_key=credentials['AWSSecretKey'],
+             watch_server_path='/var/lib/heat-cfntools/cfn-watch-server')
 
     # Then we send the metric datapoints passed in "info", note this could
     # contain multiple keys as the options parsed above are noe exclusive
@@ -239,15 +231,16 @@ def send_stats(info):
     # be associated with the alarm/watch in the engine
     metric_dims = [{'AlarmName': args.watch}]
     for key in info:
-        LOG.info("Sending watch %s metric %s, Units %s, Value %s" %
-              (args.watch, key, info[key]['Units'], info[key]['Value']))
-        client.put_metric_data(namespace=namespace,
-                               name=key,
-                               value=info[key]['Value'],
-                               timestamp=None,  # means use "now" in the engine
-                               unit=info[key]['Units'],
-                               dimensions=metric_dims,
-                               statistics=None)
+        metric_data = {
+            'namespace': namespace,
+            'name': key,
+            'value': info[key]['Value'],
+            'timestamp': None,  # means use "now" in the engine
+            'unit': info[key]['Units'],
+            'dimensions': metric_dims,
+            'statistics': None}
+        LOG.info("Sending watch %s" % metric_data)
+        client.put_metric_data(**metric_data)
 
 
 if args.haproxy:

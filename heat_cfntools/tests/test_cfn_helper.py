@@ -14,6 +14,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+from datetime import date
 import httplib
 import json
 import mox
@@ -659,3 +660,168 @@ class TestMetadataRetrieve(testtools.TestCase):
             md.retrieve(meta_str=md_data, last_path=last_file.name)
             md.cfn_init()
             self.assertThat(foo_file.name, ttm.FileContains('bar'))
+
+
+class TestMetricData(testtools.TestCase):
+
+    def test_build_dimension_param(self):
+        md = cfn_helper.MetricData()
+        self.assertDictEqual({
+            'Dimensions.member.1.Name': 'foo',
+            'Dimensions.member.1.Value': 'bar'}, md.build_dimension_param({
+                'foo': 'bar'}))
+        self.assertDictEqual({
+            'Dimensions.member.1.Name': 'foo',
+            'Dimensions.member.2.Name': 'bar'}, md.build_dimension_param({
+                'foo': None, 'bar': None}))
+        self.assertDictEqual({
+            'Dimensions.member.1.Name': 'foo',
+            'Dimensions.member.1.Value': 'first',
+            'Dimensions.member.2.Name': 'foo',
+            'Dimensions.member.2.Value': 'second',
+            'Dimensions.member.3.Name': 'foo',
+            'Dimensions.member.3.Value': 'third'}, md.build_dimension_param({
+                'foo': ['first', 'second', 'third']}))
+
+        self.assertDictEqual({
+            'Dimensions.member.1.Name': 'foo',
+            'Dimensions.member.1.Value': 1,
+            'Dimensions.member.2.Name': 'foo',
+            'Dimensions.member.2.Value': 2,
+            'Dimensions.member.3.Name': 'foo',
+            'Dimensions.member.3.Value': 3,
+            'Dimensions.member.4.Name': 'bar',
+            'Dimensions.member.4.Value': 3,
+            'Dimensions.member.5.Name': 'bar',
+            'Dimensions.member.5.Value': 2,
+            'Dimensions.member.6.Name': 'bar',
+            'Dimensions.member.6.Value': 1}, md.build_dimension_param({
+                'foo': [1, 2, 3],
+                'bar': [3, 2, 1]}))
+
+    def test_put_metric_data(self):
+
+        tstamp = time.strptime("12 Mar 13", "%d %b %y")
+        m = mox.Mox()
+        m.StubOutClassWithMocks(httplib, 'HTTPConnection')
+        m.StubOutWithMock(time, 'localtime')
+
+        describe_response = '''{"PutMetricDataResponse": {
+            "PutMetricDataResult": {
+                "ResponseMetadata": {
+                    "all": "good"
+                }
+            }
+        }}'''
+
+        time.localtime().AndReturn(tstamp)
+        conn = httplib.HTTPConnection(host='localhost', port=8004)
+        conn.request(
+            'POST',
+            '/v1/?SignatureVersion=2&AWSAccessKeyId=username&'
+            'ContentType=JSON&Timestamp=2013-03-12T00%3A00%3A00Z&'
+            'Signature=gwlPYFVI7vtPgcDHnenA8ZSDM9FhVkU%2FHglTCqdSrt0%3D&'
+            'Namespace=system%2Flinux&'
+            'MetricData.member.1.Dimensions.member.1.Name=AlarmName&'
+            'MetricData.member.1.Unit=megabytes&'
+            'MetricData.member.1.MetricName=DiskSpaceUsed&'
+            'SignatureMethod=HmacSHA256&Version=2010-08-01&'
+            'MetricData.member.1.Dimensions.member.1.Value='
+            'stack-1009-22.HeartbeatFailureAlarm&'
+            'Action=PutMetricData&MetricData.member.1.Value=1588',
+            None,
+            {'Accept': '*/*', 'User-Agent': 'heat-cfntools'}).AndReturn(None)
+        conn.getresponse().AndReturn(
+            fakes.FakeHTTPResponse(200, describe_response))
+        m.ReplayAll()
+
+        ws_info = tempfile.NamedTemporaryFile()
+        ws_info.write('http://localhost:8004\n')
+        ws_info.flush()
+
+        try:
+            md = cfn_helper.MetricData('username', 'password', ws_info.name)
+            metric_data = {
+                'namespace': 'system/linux',
+                'name': 'DiskSpaceUsed',
+                'value': 1588,
+                'timestamp': None,  # means use "now" in the engine
+                'unit': 'megabytes',
+                'dimensions': [{
+                    'AlarmName': 'stack-1009-22.HeartbeatFailureAlarm'}],
+                'statistics': None}
+            self.assertDictEqual(
+                {'all': 'good'}, md.put_metric_data(**metric_data))
+            m.VerifyAll()
+        finally:
+            m.UnsetStubs()
+
+    def test_build_put_params(self):
+        md = cfn_helper.MetricData()
+        self.assertDictEqual({
+            'MetricData.member.1.Dimensions.member.1.Name': 'AlarmName',
+            'MetricData.member.1.Dimensions.member.1.Value': 'alarm1',
+            'MetricData.member.1.MetricName': 'Heartbeat',
+            'MetricData.member.1.Unit': 'Counter',
+            'MetricData.member.1.Value': 1}, md.build_put_params(**{
+                'statistics': None,
+                'name': 'Heartbeat',
+                'timestamp': None,
+                'value': 1,
+                'unit': 'Counter',
+                'dimensions': [{'AlarmName': 'alarm1'}]}))
+
+        self.assertDictEqual({
+            'MetricData.member.1.Dimensions.member.1.Name': 'AlarmName',
+            'MetricData.member.1.Dimensions.member.1.Value': 'alarm1',
+            'MetricData.member.1.MetricName': 'DiskSpaceUsed',
+            'MetricData.member.1.Timestamp': '2013-03-13',
+            'MetricData.member.1.Unit': 'megabytes',
+            'MetricData.member.1.Value': 1588}, md.build_put_params(**{
+                'statistics': None,
+                'name': 'DiskSpaceUsed',
+                'timestamp': date(2013, 03, 13),
+                'value': 1588,
+                'unit': 'megabytes',
+                'dimensions': [{'AlarmName': 'alarm1'}]}))
+
+        self.assertDictEqual({
+            'MetricData.member.1.MetricName': 'DiskSpaceUsed',
+            'MetricData.member.1.StatisticValues.Maximum': 1111,
+            'MetricData.member.1.StatisticValues.Minimum': 999,
+            'MetricData.member.1.StatisticValues.SampleCount': 50,
+            'MetricData.member.1.StatisticValues.Sum': 50000,
+            'MetricData.member.1.Timestamp': '2013-03-13',
+            'MetricData.member.1.Unit': 'megabytes'}, md.build_put_params(**{
+                'name': 'DiskSpaceUsed',
+                'timestamp': date(2013, 03, 13),
+                'unit': 'megabytes',
+                'statistics': {
+                    'maximum': 1111,
+                    'minimum': 999,
+                    'samplecount': 50,
+                    'sum': 50000}}))
+
+        self.assertDictEqual({
+            'MetricData.member.1.MetricName': 'SwapUsed',
+            'MetricData.member.1.Unit': 'megabytes',
+            'MetricData.member.1.Value': 1000,
+            'MetricData.member.2.MetricName': 'DiskSpaceUsed',
+            'MetricData.member.2.Unit': 'megabytes',
+            'MetricData.member.2.Value': 2000,
+            'MetricData.member.3.MetricName': 'MemoryUsed',
+            'MetricData.member.3.Unit': 'megabytes',
+            'MetricData.member.3.Value': 3000}, md.build_put_params(**{
+                'name': ['SwapUsed', 'DiskSpaceUsed', 'MemoryUsed'],
+                'value': [1000, 2000, 3000],
+                'unit': ['megabytes', 'megabytes', 'megabytes']}))
+
+        self.assertRaisesRegexp(
+            Exception, 'Must specify equal .*', md.build_put_params, **{
+                'name': ['SwapUsed', 'DiskSpaceUsed', 'MemoryUsed'],
+                'value': [1000, 2000, 3000],
+                'unit': ['megabytes', 'megabytes']})
+
+        self.assertRaisesRegexp(
+            Exception, 'Must specify a value .*', md.build_put_params, **{
+                'name': 'SwapUsed'})
