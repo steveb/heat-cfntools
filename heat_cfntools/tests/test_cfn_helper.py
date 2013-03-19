@@ -14,7 +14,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-import boto.cloudformation as cfn
+import httplib
 import json
 import mox
 import subprocess
@@ -23,6 +23,8 @@ import testtools
 import testtools.matchers as ttm
 
 from heat_cfntools.cfntools import cfn_helper
+from heat_cfntools.tests import fakes
+import time
 
 
 class FakePOpen():
@@ -443,33 +445,21 @@ class TestCfnHelper(testtools.TestCase):
         with tempfile.NamedTemporaryFile() as metadata_info:
             metadata_info.write(content)
             metadata_info.flush()
-            port = cfn_helper.metadata_server_port(metadata_info.name)
-            self.assertEquals(value, port)
+            one_line = cfn_helper.read_one_line_file(metadata_info.name)
+            self.assertEquals(value, one_line)
 
-    def test_metadata_server_port(self):
-        self._check_metadata_content("http://172.20.42.42:8000\n", 8000)
+    def test_read_one_line_file(self):
+        self._check_metadata_content(
+            "http://172.20.42.42:8000\n", 'http://172.20.42.42:8000')
 
-    def test_metadata_server_port_https(self):
-        self._check_metadata_content("https://abc.foo.bar:6969\n", 6969)
-
-    def test_metadata_server_port_noport(self):
-        self._check_metadata_content("http://172.20.42.42\n", None)
-
-    def test_metadata_server_port_justip(self):
-        self._check_metadata_content("172.20.42.42", None)
-
-    def test_metadata_server_port_weird(self):
-        self._check_metadata_content("::::", None)
-        self._check_metadata_content("beforecolons:aftercolons", None)
-
-    def test_metadata_server_port_emptyfile(self):
+    def test_read_one_line_file_emptyfile(self):
         self._check_metadata_content("\n", None)
         self._check_metadata_content("", None)
 
-    def test_metadata_server_nofile(self):
+    def test_read_one_line_file_nofile(self):
         random_filename = self.getUniqueString()
         self.assertEquals(None,
-                          cfn_helper.metadata_server_port(random_filename))
+                          cfn_helper.read_one_line_file(random_filename))
 
     def test_to_boolean(self):
         self.assertTrue(cfn_helper.to_boolean(True))
@@ -587,17 +577,42 @@ class TestMetadataRetrieve(testtools.TestCase):
 
         md_data = {"AWS::CloudFormation::Init": {"config": {"files": {
             "/tmp/foo": {"content": "bar"}}}}}
-
+        tstamp = time.strptime("12 Mar 13", "%d %b %y")
         m = mox.Mox()
-        m.StubOutWithMock(
-            cfn.CloudFormationConnection, 'describe_stack_resource')
+        m.StubOutClassWithMocks(httplib, 'HTTPConnection')
+        m.StubOutWithMock(time, 'localtime')
 
-        cfn.CloudFormationConnection.describe_stack_resource(
-            'teststack', None).MultipleTimes().AndReturn({
-                'DescribeStackResourceResponse': {
-                    'DescribeStackResourceResult': {
-                        'StackResourceDetail': {'Metadata': md_data}}}})
+        describe_response = '''{"DescribeStackResourceResponse": {
+            "DescribeStackResourceResult": {
+                "StackResourceDetail": {
+                    "StackId": "arn:openstack:heat::aaaa:stacks/stack/bbb",
+                    "ResourceStatus": "CREATE_COMPLETE",
+                    "Description": "",
+                    "ResourceType": "AWS::EC2::Instance",
+                    "ResourceStatusReason": "state changed",
+                    "LastUpdatedTimestamp": "2013-03-12T20:48:39Z",
+                    "StackName": "stack",
+                    "PhysicalResourceId": "ddd",
+                    "Metadata": %s,
+                    "LogicalResourceId": "WikiDatabase"
+                }
+            }
+        }}''' % json.dumps(md_data)
 
+        time.localtime().AndReturn(tstamp)
+        conn = httplib.HTTPConnection(host='localhost', port=8000)
+        conn.request(
+            'GET',
+            '/v1/?StackName=teststack&SignatureMethod=HmacSHA256&'
+            'AWSAccessKeyId=foo&ContentType=JSON&'
+            'Signature=zuvuT%2FR1sSVtqEqbejw%2FPphwkAnmdT9QnlK%2BsPst3K8%3D&'
+            'Action=DescribeStackResource&'
+            'Timestamp=2013-03-12T00%3A00%3A00Z&'
+            'SignatureVersion=2&LogicalResourceId=None',
+            None,
+            {'Accept': '*/*', 'User-Agent': 'heat-cfntools'}).AndReturn(None)
+        conn.getresponse().AndReturn(
+            fakes.FakeHTTPResponse(200, describe_response))
         m.ReplayAll()
 
         with tempfile.NamedTemporaryFile() as last_file:
@@ -609,16 +624,23 @@ class TestMetadataRetrieve(testtools.TestCase):
                 None,
                 access_key='foo',
                 secret_key='bar')
-            md.retrieve(last_path=last_file.name)
+
+            metadata_info = tempfile.NamedTemporaryFile()
+            metadata_info.write('http://localhost:8000\n')
+            metadata_info.flush()
+            fcreds = tempfile.NamedTemporaryFile(mode='w')
+            fcreds.write('AWSAccessKeyId=foo\nAWSSecretKey=bar\n')
+            fcreds.flush()
+            md = cfn_helper.Metadata(
+                'teststack', None, credentials_file=fcreds.name)
+            md.retrieve(
+                metadata_server_path=metadata_info.name,
+                last_path=last_file.name)
+
             self.assertDictEqual(md_data, md._metadata)
 
-            with tempfile.NamedTemporaryFile(mode='w') as fcreds:
-                fcreds.write('AWSAccessKeyId=foo\nAWSSecretKey=bar\n')
-                fcreds.flush()
-                md = cfn_helper.Metadata(
-                    'teststack', None, credentials_file=fcreds.name)
-                md.retrieve(last_path=last_file.name)
-            self.assertDictEqual(md_data, md._metadata)
+            fcreds.close()
+            metadata_info.close()
 
             m.VerifyAll()
         finally:
